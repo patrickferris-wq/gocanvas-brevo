@@ -1,4 +1,3 @@
-// /index.js
 const express = require("express");
 const axios = require("axios");
 
@@ -138,12 +137,6 @@ app.post("/gocanvas-webhook", async (req, res) => {
     console.error(err.response?.data || err.message);
     return res.status(500).send("Server error");
   }
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
-});
-  console.log(`Server running on port ${PORT}`);
 });
 
 app.listen(PORT, "0.0.0.0", () => {
