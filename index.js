@@ -11,35 +11,30 @@ app.get("/", (_req, res) => {
   res.send("GoCanvas/Brevo webhook is running.");
 });
 
-function findEmailInGoCanvasJson(node) {
-  if (!node) return "";
+function decodeXmlEntities(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim();
+}
 
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      const email = findEmailInGoCanvasJson(item);
-      if (email) return email;
-    }
+function extractEmailFromXml(xml) {
+  if (!xml || typeof xml !== "string") {
     return "";
   }
 
-  if (typeof node !== "object") {
+  const pattern =
+    /<Label>\s*Email:?\s*<\/Label>[\s\S]*?<Value>\s*([^<]+?)\s*<\/Value>/i;
+
+  const match = xml.match(pattern);
+  if (!match) {
     return "";
   }
 
-  const label = typeof node.Label === "string" ? node.Label.trim() : "";
-  const value = typeof node.Value === "string" ? node.Value.trim() : "";
-  const normalizedLabel = label.toLowerCase().replace(/[^a-z]/g, "");
-
-  if (normalizedLabel === "email" && value) {
-    return value;
-  }
-
-  for (const key of Object.keys(node)) {
-    const email = findEmailInGoCanvasJson(node[key]);
-    if (email) return email;
-  }
-
-  return "";
+  return decodeXmlEntities(match[1]);
 }
 
 async function fetchGoCanvasSubmission(submissionId) {
@@ -55,7 +50,7 @@ async function fetchGoCanvasSubmission(submissionId) {
   const response = await axios.get(url, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
+      Accept: "application/json, application/xml, text/xml, */*",
     },
     params: {
       username,
@@ -63,7 +58,11 @@ async function fetchGoCanvasSubmission(submissionId) {
     timeout: 30000,
   });
 
-  return response.data;
+  if (typeof response.data === "string") {
+    return response.data;
+  }
+
+  return JSON.stringify(response.data);
 }
 
 async function upsertBrevoContact(email) {
@@ -107,19 +106,19 @@ app.post("/gocanvas-webhook", async (req, res) => {
       return res.status(200).send("Received");
     }
 
-    let submissionData;
+    let submissionXml;
 
     try {
-      submissionData = await fetchGoCanvasSubmission(submissionId);
+      submissionXml = await fetchGoCanvasSubmission(submissionId);
       console.log("Full submission fetched:");
-      console.log(JSON.stringify(submissionData, null, 2).slice(0, 4000));
+      console.log(submissionXml.slice(0, 4000));
     } catch (err) {
       console.error("Failed to fetch submission:");
       console.error(err.response?.data || err.message);
       return res.status(200).send("Fetch failed");
     }
 
-    const email = findEmailInGoCanvasJson(submissionData);
+    const email = extractEmailFromXml(submissionXml);
 
     if (!email) {
       console.log('Field "Email" not found in submission data.');
