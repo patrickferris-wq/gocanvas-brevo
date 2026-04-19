@@ -73,24 +73,24 @@ function pickFirst(obj, keys) {
   return "";
 }
 
-// ===== FETCH FULL SUBMISSION (FIXED AUTH) =====
+// ===== FETCH FULL SUBMISSION (API KEY + USERNAME PARAM) =====
 async function fetchGoCanvasSubmission(submissionId) {
+  const apiKey = process.env.GOCANVAS_API_KEY;
   const username = process.env.GOCANVAS_USERNAME;
-  const password = process.env.GOCANVAS_PASSWORD;
 
-  if (!username || !password) {
-    throw new Error("Missing GOCANVAS_USERNAME or GOCANVAS_PASSWORD");
+  if (!apiKey || !username) {
+    throw new Error("Missing GOCANVAS_API_KEY or GOCANVAS_USERNAME");
   }
 
   const url = `https://www.gocanvas.com/apiv2/submissions/${submissionId}.json`;
 
   const response = await axios.get(url, {
-    auth: {
-      username,
-      password,
-    },
     headers: {
+      Authorization: `Bearer ${apiKey}`,
       Accept: "application/json",
+    },
+    params: {
+      username,
     },
     timeout: 30000,
   });
