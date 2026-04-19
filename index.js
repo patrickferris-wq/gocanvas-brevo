@@ -1,64 +1,15 @@
 const express = require("express");
 const axios = require("axios");
+const xml2js = require("xml2js");
 
 const app = express();
 app.use(express.json());
 
-// ===== ENV VARIABLES =====
 const BREVO_CUSTOMER_LIST_ID = Number(process.env.BREVO_CUSTOMER_LIST_ID);
 
-// ===== ROOT CHECK =====
 app.get("/", (req, res) => {
   res.send("GoCanvas/Brevo webhook is running.");
 });
-
-// ===== HELPERS =====
-function flattenSubmissionData(payload) {
-  const out = {};
-
-  if (Array.isArray(payload?.fields)) {
-    for (const field of payload.fields) {
-      if (field?.label) out[field.label] = field.value ?? "";
-      if (field?.name && !(field.name in out)) out[field.name] = field.value ?? "";
-    }
-  }
-
-  if (Array.isArray(payload?.values)) {
-    for (const value of payload.values) {
-      const key =
-        value?.export_label ||
-        value?.label ||
-        value?.name ||
-        value?.field_name;
-
-      if (key) out[key] = value?.value ?? "";
-    }
-  }
-
-  if (payload && typeof payload === "object") {
-    for (const [key, value] of Object.entries(payload)) {
-      if (
-        ![
-          "fields",
-          "values",
-          "submission",
-          "form",
-          "dispatch_item",
-          "type",
-          "id",
-          "guid",
-        ].includes(key) &&
-        (typeof value === "string" ||
-          typeof value === "number" ||
-          typeof value === "boolean")
-      ) {
-        out[key] = value;
-      }
-    }
-  }
-
-  return out;
-}
 
 function pickFirst(obj, keys) {
   for (const key of keys) {
@@ -73,7 +24,43 @@ function pickFirst(obj, keys) {
   return "";
 }
 
-// ===== FETCH FULL SUBMISSION (API KEY + USERNAME PARAM) =====
+function ensureArray(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function flattenGoCanvasXml(parsed) {
+  const out = {};
+
+  try {
+    const root = parsed?.CanvasResult?.Submissions?.Submission;
+    if (!root) return out;
+
+    const screens = ensureArray(root.Screens?.Screen);
+
+    for (const screen of screens) {
+      const sections = ensureArray(screen.Sections?.Section);
+
+      for (const section of sections) {
+        const responses = ensureArray(section.Responses?.Response);
+
+        for (const response of responses) {
+          const label = String(response?.Label ?? "").trim();
+          const value = String(response?.Value ?? "").trim();
+
+          if (label) {
+            out[label] = value;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Failed flattening GoCanvas XML:", err.message);
+  }
+
+  return out;
+}
+
 async function fetchGoCanvasSubmission(submissionId) {
   const apiKey = process.env.GOCANVAS_API_KEY;
   const username = process.env.GOCANVAS_USERNAME;
@@ -98,7 +85,16 @@ async function fetchGoCanvasSubmission(submissionId) {
   return response.data;
 }
 
-// ===== SEND TO BREVO =====
+async function parseGoCanvasXml(xmlString) {
+  const parser = new xml2js.Parser({
+    explicitArray: false,
+    trim: true,
+    mergeAttrs: true,
+  });
+
+  return parser.parseStringPromise(xmlString);
+}
+
 async function upsertBrevoContact({
   email,
   firstName,
@@ -129,7 +125,6 @@ async function upsertBrevoContact({
   );
 }
 
-// ===== WEBHOOK =====
 app.post("/gocanvas-webhook", async (req, res) => {
   try {
     console.log("Webhook received:");
@@ -142,19 +137,28 @@ app.post("/gocanvas-webhook", async (req, res) => {
       return res.status(200).send("Received");
     }
 
-    let fullData;
+    let rawData;
 
     try {
-      fullData = await fetchGoCanvasSubmission(submissionId);
+      rawData = await fetchGoCanvasSubmission(submissionId);
       console.log("Full submission fetched:");
-      console.log(JSON.stringify(fullData, null, 2));
+      console.log(typeof rawData === "string" ? rawData.slice(0, 2000) : JSON.stringify(rawData, null, 2));
     } catch (err) {
       console.error("Failed to fetch submission:");
       console.error(err.response?.data || err.message);
       return res.status(200).send("Fetch failed");
     }
 
-    const flat = flattenSubmissionData(fullData);
+    let parsed;
+    try {
+      parsed = await parseGoCanvasXml(rawData);
+    } catch (err) {
+      console.error("Failed to parse XML:");
+      console.error(err.message);
+      return res.status(200).send("XML parse failed");
+    }
+
+    const flat = flattenGoCanvasXml(parsed);
 
     console.log("Flattened submission:");
     console.log(JSON.stringify(flat, null, 2));
@@ -163,6 +167,8 @@ app.post("/gocanvas-webhook", async (req, res) => {
       "Email",
       "Customer Email",
       "Email Address",
+      "preferred email for communication and completed document delivery",
+      "Email address",
       "email",
     ]);
 
@@ -184,6 +190,7 @@ app.post("/gocanvas-webhook", async (req, res) => {
       "Phone",
       "Phone Number",
       "Customer Phone",
+      "Provide best contact number (mobile preferred).",
       "phone",
       "SMS",
       "sms",
@@ -212,7 +219,6 @@ app.post("/gocanvas-webhook", async (req, res) => {
     });
 
     console.log("Contact sent to Brevo");
-
     res.status(200).send("Success");
   } catch (err) {
     console.error("Webhook handler error:");
@@ -221,8 +227,8 @@ app.post("/gocanvas-webhook", async (req, res) => {
   }
 });
 
-// ===== START SERVER =====
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
+});
 });
