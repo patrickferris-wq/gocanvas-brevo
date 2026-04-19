@@ -62,26 +62,34 @@ function flattenSubmissionData(payload) {
 
 function pickFirst(obj, keys) {
   for (const key of keys) {
-    if (obj[key] !== undefined && obj[key] !== null && String(obj[key]).trim() !== "") {
+    if (
+      obj[key] !== undefined &&
+      obj[key] !== null &&
+      String(obj[key]).trim() !== ""
+    ) {
       return String(obj[key]).trim();
     }
   }
   return "";
 }
 
-// ===== FETCH FULL SUBMISSION =====
+// ===== FETCH FULL SUBMISSION (FIXED AUTH) =====
 async function fetchGoCanvasSubmission(submissionId) {
-  const apiKey = process.env.GOCANVAS_API_KEY;
+  const username = process.env.GOCANVAS_USERNAME;
+  const password = process.env.GOCANVAS_PASSWORD;
 
-  if (!apiKey) {
-    throw new Error("Missing GOCANVAS_API_KEY environment variable");
+  if (!username || !password) {
+    throw new Error("Missing GOCANVAS_USERNAME or GOCANVAS_PASSWORD");
   }
 
   const url = `https://www.gocanvas.com/apiv2/submissions/${submissionId}.json`;
 
   const response = await axios.get(url, {
+    auth: {
+      username,
+      password,
+    },
     headers: {
-      Authorization: `Bearer ${apiKey}`,
       Accept: "application/json",
     },
     timeout: 30000,
@@ -91,7 +99,13 @@ async function fetchGoCanvasSubmission(submissionId) {
 }
 
 // ===== SEND TO BREVO =====
-async function upsertBrevoContact({ email, firstName, lastName, phone, company }) {
+async function upsertBrevoContact({
+  email,
+  firstName,
+  lastName,
+  phone,
+  company,
+}) {
   await axios.post(
     "https://api.brevo.com/v3/contacts",
     {
@@ -142,6 +156,9 @@ app.post("/gocanvas-webhook", async (req, res) => {
 
     const flat = flattenSubmissionData(fullData);
 
+    console.log("Flattened submission:");
+    console.log(JSON.stringify(flat, null, 2));
+
     const email = pickFirst(flat, [
       "Email",
       "Customer Email",
@@ -181,12 +198,10 @@ app.post("/gocanvas-webhook", async (req, res) => {
 
     if (!email) {
       console.log("No email found in full submission data.");
-      console.log("Flattened submission:");
-      console.log(JSON.stringify(flat, null, 2));
       return res.status(200).send("Received, but no email found");
     }
 
-    console.log("Brevo list ID:", BREVO_CUSTOMER_LIST_ID);
+    console.log("Sending to Brevo:", email);
 
     await upsertBrevoContact({
       email,
