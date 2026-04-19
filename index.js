@@ -12,39 +12,55 @@ app.get("/", (_req, res) => {
   res.send("GoCanvas/Brevo webhook is running.");
 });
 
-function ensureArray(value) {
-  if (!value) return [];
-  return Array.isArray(value) ? value : [value];
+function normalizeLabel(label) {
+  return String(label || "")
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
 }
 
-function findEmailInGoCanvasJson(node) {
-  if (!node) return "";
+function extractFieldsFromGoCanvasJson(node, fields = {}) {
+  if (!node) return fields;
 
   if (Array.isArray(node)) {
     for (const item of node) {
-      const email = findEmailInGoCanvasJson(item);
-      if (email) return email;
+      extractFieldsFromGoCanvasJson(item, fields);
     }
-    return "";
+    return fields;
   }
 
   if (typeof node !== "object") {
-    return "";
+    return fields;
   }
 
   const label = typeof node.Label === "string" ? node.Label.trim() : "";
   const value = typeof node.Value === "string" ? node.Value.trim() : "";
+  const normalizedLabel = normalizeLabel(label);
 
-  if (label === "Email" && value) {
-    return value;
+  if (value) {
+    if (normalizedLabel === "email" && !fields.email) {
+      fields.email = value;
+    }
+
+    if (
+      ["firstname", "customerfirstname", "first"].includes(normalizedLabel) &&
+      !fields.firstName
+    ) {
+      fields.firstName = value;
+    }
+
+    if (
+      ["lastname", "customerlastname", "last"].includes(normalizedLabel) &&
+      !fields.lastName
+    ) {
+      fields.lastName = value;
+    }
   }
 
   for (const key of Object.keys(node)) {
-    const email = findEmailInGoCanvasJson(node[key]);
-    if (email) return email;
+    extractFieldsFromGoCanvasJson(node[key], fields);
   }
 
-  return "";
+  return fields;
 }
 
 async function fetchGoCanvasSubmission(submissionId) {
@@ -62,15 +78,19 @@ async function fetchGoCanvasSubmission(submissionId) {
       Authorization: `Bearer ${apiKey}`,
       Accept: "application/json",
     },
-    params: { username },
+    params: {
+      username,
+    },
     timeout: 30000,
   });
 
   return response.data;
 }
 
-async function upsertBrevoContact(email) {
-  if (!process.env.BREVO_API_KEY) {
+async function upsertBrevoContact({ email, firstName, lastName }) {
+  const brevoApiKey = process.env.BREVO_API_KEY;
+
+  if (!brevoApiKey) {
     throw new Error("Missing BREVO_API_KEY");
   }
 
@@ -78,16 +98,22 @@ async function upsertBrevoContact(email) {
     throw new Error("Missing BREVO_CUSTOMER_LIST_ID");
   }
 
+  const attributes = {};
+
+  if (firstName) attributes.FIRSTNAME = firstName;
+  if (lastName) attributes.LASTNAME = lastName;
+
   await axios.post(
     "https://api.brevo.com/v3/contacts",
     {
       email,
+      attributes,
       listIds: [BREVO_CUSTOMER_LIST_ID],
       updateEnabled: true,
     },
     {
       headers: {
-        "api-key": process.env.BREVO_API_KEY,
+        "api-key": brevoApiKey,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
@@ -109,6 +135,7 @@ app.post("/gocanvas-webhook", async (req, res) => {
     }
 
     let submissionData;
+
     try {
       submissionData = await fetchGoCanvasSubmission(submissionId);
       console.log("Full submission fetched:");
@@ -119,16 +146,20 @@ app.post("/gocanvas-webhook", async (req, res) => {
       return res.status(200).send("Fetch failed");
     }
 
-    const email = findEmailInGoCanvasJson(submissionData);
+    const fields = extractFieldsFromGoCanvasJson(submissionData);
 
-    if (!email) {
+    console.log("Extracted fields:", fields);
+
+    if (!fields.email) {
       console.log('Field "Email" not found in submission data.');
       return res.status(200).send('Received, but field "Email" not found');
     }
 
-    console.log("Email found:", email);
-
-    await upsertBrevoContact(email);
+    await upsertBrevoContact({
+      email: fields.email,
+      firstName: fields.firstName,
+      lastName: fields.lastName,
+    });
 
     console.log("Contact updated in Brevo Customers list.");
     return res.status(200).send("Success");
@@ -137,6 +168,10 @@ app.post("/gocanvas-webhook", async (req, res) => {
     console.error(err.response?.data || err.message);
     return res.status(500).send("Server error");
   }
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
 app.listen(PORT, "0.0.0.0", () => {
