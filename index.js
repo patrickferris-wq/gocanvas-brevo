@@ -12,55 +12,35 @@ app.get("/", (_req, res) => {
   res.send("GoCanvas/Brevo webhook is running.");
 });
 
-function normalizeLabel(label) {
-  return String(label || "")
-    .toLowerCase()
-    .replace(/[^a-z]/g, "");
-}
-
-function extractFieldsFromGoCanvasJson(node, fields = {}) {
-  if (!node) return fields;
+function findEmailInGoCanvasJson(node) {
+  if (!node) return "";
 
   if (Array.isArray(node)) {
     for (const item of node) {
-      extractFieldsFromGoCanvasJson(item, fields);
+      const email = findEmailInGoCanvasJson(item);
+      if (email) return email;
     }
-    return fields;
+    return "";
   }
 
   if (typeof node !== "object") {
-    return fields;
+    return "";
   }
 
   const label = typeof node.Label === "string" ? node.Label.trim() : "";
   const value = typeof node.Value === "string" ? node.Value.trim() : "";
-  const normalizedLabel = normalizeLabel(label);
+  const normalizedLabel = label.toLowerCase().replace(/[^a-z]/g, "");
 
-  if (value) {
-    if (normalizedLabel === "email" && !fields.email) {
-      fields.email = value;
-    }
-
-    if (
-      ["firstname", "customerfirstname", "first"].includes(normalizedLabel) &&
-      !fields.firstName
-    ) {
-      fields.firstName = value;
-    }
-
-    if (
-      ["lastname", "customerlastname", "last"].includes(normalizedLabel) &&
-      !fields.lastName
-    ) {
-      fields.lastName = value;
-    }
+  if (normalizedLabel === "email" && value) {
+    return value;
   }
 
   for (const key of Object.keys(node)) {
-    extractFieldsFromGoCanvasJson(node[key], fields);
+    const email = findEmailInGoCanvasJson(node[key]);
+    if (email) return email;
   }
 
-  return fields;
+  return "";
 }
 
 async function fetchGoCanvasSubmission(submissionId) {
@@ -87,7 +67,7 @@ async function fetchGoCanvasSubmission(submissionId) {
   return response.data;
 }
 
-async function upsertBrevoContact({ email, firstName, lastName }) {
+async function upsertBrevoContact(email) {
   const brevoApiKey = process.env.BREVO_API_KEY;
 
   if (!brevoApiKey) {
@@ -98,16 +78,10 @@ async function upsertBrevoContact({ email, firstName, lastName }) {
     throw new Error("Missing BREVO_CUSTOMER_LIST_ID");
   }
 
-  const attributes = {};
-
-  if (firstName) attributes.FIRSTNAME = firstName;
-  if (lastName) attributes.LASTNAME = lastName;
-
   await axios.post(
     "https://api.brevo.com/v3/contacts",
     {
       email,
-      attributes,
       listIds: [BREVO_CUSTOMER_LIST_ID],
       updateEnabled: true,
     },
@@ -146,20 +120,16 @@ app.post("/gocanvas-webhook", async (req, res) => {
       return res.status(200).send("Fetch failed");
     }
 
-    const fields = extractFieldsFromGoCanvasJson(submissionData);
+    const email = findEmailInGoCanvasJson(submissionData);
 
-    console.log("Extracted fields:", fields);
-
-    if (!fields.email) {
+    if (!email) {
       console.log('Field "Email" not found in submission data.');
       return res.status(200).send('Received, but field "Email" not found');
     }
 
-    await upsertBrevoContact({
-      email: fields.email,
-      firstName: fields.firstName,
-      lastName: fields.lastName,
-    });
+    console.log("Email found:", email);
+
+    await upsertBrevoContact(email);
 
     console.log("Contact updated in Brevo Customers list.");
     return res.status(200).send("Success");
@@ -171,6 +141,8 @@ app.post("/gocanvas-webhook", async (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
+});
   console.log(`Server running on port ${PORT}`);
 });
 
