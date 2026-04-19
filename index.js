@@ -5,7 +5,9 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
-const BREVO_CUSTOMER_LIST_ID = Number(process.env.BREVO_CUSTOMER_LIST_ID);
+const BREVO_CUSTOMER_LIST_ID = Number(process.env.BREVO_CUSTOMER_LIST_ID || 46);
+const BREVO_NEW_LEAD_LIST_ID = Number(process.env.BREVO_NEW_LEAD_LIST_ID || 23);
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
 
 app.get("/", (_req, res) => {
   res.send("GoCanvas/Brevo webhook is running.");
@@ -37,13 +39,22 @@ function extractEmailFromXml(xml) {
   return decodeXmlEntities(match[1]);
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+}
+
+function requireEnv(name, value) {
+  if (!value || String(value).trim() === "") {
+    throw new Error(`Missing ${name}`);
+  }
+}
+
 async function fetchGoCanvasSubmission(submissionId) {
   const apiKey = process.env.GOCANVAS_API_KEY;
   const username = process.env.GOCANVAS_USERNAME;
 
-  if (!apiKey || !username) {
-    throw new Error("Missing GOCANVAS_API_KEY or GOCANVAS_USERNAME");
-  }
+  requireEnv("GOCANVAS_API_KEY", apiKey);
+  requireEnv("GOCANVAS_USERNAME", username);
 
   const url = `https://www.gocanvas.com/apiv2/submissions/${submissionId}.json`;
 
@@ -65,23 +76,24 @@ async function fetchGoCanvasSubmission(submissionId) {
   return JSON.stringify(response.data);
 }
 
-async function upsertBrevoContact(email) {
+async function updateBrevoContactLists(email) {
   const brevoApiKey = process.env.BREVO_API_KEY;
 
-  if (!brevoApiKey) {
-    throw new Error("Missing BREVO_API_KEY");
-  }
+  requireEnv("BREVO_API_KEY", brevoApiKey);
 
   if (!BREVO_CUSTOMER_LIST_ID) {
     throw new Error("Missing BREVO_CUSTOMER_LIST_ID");
   }
 
-  await axios.post(
-    "https://api.brevo.com/v3/contacts",
+  if (!BREVO_NEW_LEAD_LIST_ID) {
+    throw new Error("Missing BREVO_NEW_LEAD_LIST_ID");
+  }
+
+  await axios.put(
+    `https://api.brevo.com/v3/contacts/${encodeURIComponent(email)}`,
     {
-      email,
       listIds: [BREVO_CUSTOMER_LIST_ID],
-      updateEnabled: true,
+      unlinkListIds: [BREVO_NEW_LEAD_LIST_ID],
     },
     {
       headers: {
@@ -96,40 +108,63 @@ async function upsertBrevoContact(email) {
 
 app.post("/gocanvas-webhook", async (req, res) => {
   try {
+    if (!WEBHOOK_SECRET) {
+      console.error("Webhook blocked: WEBHOOK_SECRET is not configured.");
+      return res.status(500).send("Webhook secret not configured");
+    }
+
+    if (req.query.secret !== WEBHOOK_SECRET) {
+      console.warn("Webhook rejected: invalid secret.");
+      return res.status(403).send("Forbidden");
+    }
+
     console.log("Webhook received:");
     console.log(JSON.stringify(req.body, null, 2));
 
     const submissionId = req.body?.submission?.id;
 
     if (!submissionId) {
-      console.log("No submission ID in payload.");
-      return res.status(200).send("Received");
+      console.warn("Bad submission: missing submission.id");
+      return res.status(400).send("Missing submission ID");
     }
 
     let submissionXml;
 
     try {
       submissionXml = await fetchGoCanvasSubmission(submissionId);
-      console.log("Full submission fetched:");
+      console.log(`Submission ${submissionId} fetched successfully.`);
       console.log(submissionXml.slice(0, 4000));
     } catch (err) {
-      console.error("Failed to fetch submission:");
+      console.error(`Fetch failed for submission ${submissionId}:`);
       console.error(err.response?.data || err.message);
-      return res.status(200).send("Fetch failed");
+      return res.status(502).send("Fetch failed");
     }
 
     const email = extractEmailFromXml(submissionXml);
 
     if (!email) {
-      console.log('Field "Email" not found in submission data.');
+      console.warn(`Submission ${submissionId}: Email field not found.`);
       return res.status(200).send('Received, but field "Email" not found');
     }
 
-    console.log("Email found:", email);
+    if (!isValidEmail(email)) {
+      console.warn(`Submission ${submissionId}: invalid email extracted -> ${email}`);
+      return res.status(200).send("Received, but email was invalid");
+    }
 
-    await upsertBrevoContact(email);
+    console.log(`Submission ${submissionId}: email found -> ${email}`);
 
-    console.log("Contact updated in Brevo Customers list.");
+    try {
+      await updateBrevoContactLists(email);
+      console.log(
+        `Brevo updated: ${email} added to list ${BREVO_CUSTOMER_LIST_ID} and removed from list ${BREVO_NEW_LEAD_LIST_ID}.`
+      );
+    } catch (err) {
+      console.error(`Brevo update failed for ${email}:`);
+      console.error(err.response?.data || err.message);
+      return res.status(502).send("Brevo update failed");
+    }
+
     return res.status(200).send("Success");
   } catch (err) {
     console.error("Webhook handler error:");
