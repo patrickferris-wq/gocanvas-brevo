@@ -13,6 +13,12 @@ app.get("/", (_req, res) => {
   res.send("GoCanvas/Brevo webhook is running.");
 });
 
+function requireEnv(name, value) {
+  if (!value || String(value).trim() === "") {
+    throw new Error(`Missing ${name}`);
+  }
+}
+
 function decodeXmlEntities(value) {
   return String(value || "")
     .replace(/&amp;/g, "&")
@@ -43,12 +49,6 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 }
 
-function requireEnv(name, value) {
-  if (!value || String(value).trim() === "") {
-    throw new Error(`Missing ${name}`);
-  }
-}
-
 async function fetchGoCanvasSubmission(submissionId) {
   const apiKey = process.env.GOCANVAS_API_KEY;
   const username = process.env.GOCANVAS_USERNAME;
@@ -63,9 +63,7 @@ async function fetchGoCanvasSubmission(submissionId) {
       Authorization: `Bearer ${apiKey}`,
       Accept: "application/json, application/xml, text/xml, */*",
     },
-    params: {
-      username,
-    },
+    params: { username },
     timeout: 30000,
   });
 
@@ -76,15 +74,37 @@ async function fetchGoCanvasSubmission(submissionId) {
   return JSON.stringify(response.data);
 }
 
-async function updateBrevoContactLists(email) {
+function getBrevoAxiosConfig() {
   const brevoApiKey = process.env.BREVO_API_KEY;
-
   requireEnv("BREVO_API_KEY", brevoApiKey);
 
+  return {
+    headers: {
+      "api-key": brevoApiKey,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    timeout: 30000,
+  };
+}
+
+async function createOrUpdateBrevoContact(email) {
   if (!BREVO_CUSTOMER_LIST_ID) {
     throw new Error("Missing BREVO_CUSTOMER_LIST_ID");
   }
 
+  await axios.post(
+    "https://api.brevo.com/v3/contacts",
+    {
+      email,
+      listIds: [BREVO_CUSTOMER_LIST_ID],
+      updateEnabled: true,
+    },
+    getBrevoAxiosConfig()
+  );
+}
+
+async function removeContactFromLeadList(email) {
   if (!BREVO_NEW_LEAD_LIST_ID) {
     throw new Error("Missing BREVO_NEW_LEAD_LIST_ID");
   }
@@ -92,17 +112,9 @@ async function updateBrevoContactLists(email) {
   await axios.put(
     `https://api.brevo.com/v3/contacts/${encodeURIComponent(email)}`,
     {
-      listIds: [BREVO_CUSTOMER_LIST_ID],
       unlinkListIds: [BREVO_NEW_LEAD_LIST_ID],
     },
-    {
-      headers: {
-        "api-key": brevoApiKey,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      timeout: 30000,
-    }
+    getBrevoAxiosConfig()
   );
 }
 
@@ -129,7 +141,6 @@ app.post("/gocanvas-webhook", async (req, res) => {
     }
 
     let submissionXml;
-
     try {
       submissionXml = await fetchGoCanvasSubmission(submissionId);
       console.log(`Submission ${submissionId} fetched successfully.`);
@@ -155,14 +166,24 @@ app.post("/gocanvas-webhook", async (req, res) => {
     console.log(`Submission ${submissionId}: email found -> ${email}`);
 
     try {
-      await updateBrevoContactLists(email);
+      await createOrUpdateBrevoContact(email);
       console.log(
-        `Brevo updated: ${email} added to list ${BREVO_CUSTOMER_LIST_ID} and removed from list ${BREVO_NEW_LEAD_LIST_ID}.`
+        `Brevo create-or-update succeeded for ${email}; added to Customers list ${BREVO_CUSTOMER_LIST_ID}.`
       );
     } catch (err) {
-      console.error(`Brevo update failed for ${email}:`);
+      console.error(`Brevo create-or-update failed for ${email}:`);
       console.error(err.response?.data || err.message);
-      return res.status(502).send("Brevo update failed");
+      return res.status(502).send("Brevo create-or-update failed");
+    }
+
+    try {
+      await removeContactFromLeadList(email);
+      console.log(
+        `Brevo unlink succeeded for ${email}; removed from New Lead list ${BREVO_NEW_LEAD_LIST_ID}.`
+      );
+    } catch (err) {
+      console.warn(`Brevo unlink skipped/failed for ${email}:`);
+      console.warn(err.response?.data || err.message);
     }
 
     return res.status(200).send("Success");
